@@ -14,8 +14,8 @@ class RequestHandler(Thread):
     def __init__(self, loop, host, port, node, filename):
         super().__init__()
         self._loop = loop
-        self._url = 'http://' + host + ':' 
-                    + str(port) + '/' + filename
+        self._url = 'http://' + host + ':' \
+                    + str(port) + '/' + filename \
                     + '?do_not_visit=True'
         self._text = ''
         self._answer = False
@@ -126,8 +126,19 @@ class Daemon:
                 loop.call_at(loop.time() + time, self._delete_file, loop, filename)
         return web.Response(text=text)
 
+    async def _post_file(self, request):
+        data = await request.post()
+        filename = data['file'].filename
+        up_file = data['file'].file
+        text = up_file.read().decode()
+        write_thread = Writer(self._directory, filename, text)
+        write_thread.start()
+        
+        return web.Response(text='OK')
+
     async def _setup_routing(self):
         self._app.add_routes([
+            web.route('*', '/add', self._post_file, name='post_file'),
             web.route('*', '/{filename}', self._file_handler, name='file_handler'),
             ])
 
