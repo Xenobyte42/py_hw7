@@ -6,4 +6,6 @@ other_nodes:
         host: localhost
         port: 8081
         save: True
+        time: 5
 save: True
+time: 60

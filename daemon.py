@@ -1,3 +1,4 @@
+import os
 from threading import Thread
 from os.path import join
 from aiohttp import web, ClientSession, client_exceptions
@@ -10,13 +11,15 @@ from asyncio import new_event_loop, get_event_loop
 
 class RequestHandler(Thread):
 
-    def __init__(self, loop, host, port, save, filename):
+    def __init__(self, loop, host, port, node, filename):
         super().__init__()
         self._loop = loop
-        self._url = 'http://' + host + ':' + str(port) + '/' + filename + '?do_not_visit=True'
+        self._url = 'http://' + host + ':' 
+                    + str(port) + '/' + filename
+                    + '?do_not_visit=True'
         self._text = ''
         self._answer = False
-        self._save = save
+        self._node = node
 
     async def _get_responce(self):
         try:
@@ -34,7 +37,7 @@ class RequestHandler(Thread):
     async def join(self):
         await self._task
         await self._loop.run_in_executor(None, Thread.join, self)
-        return (self._answer, self._text, self._save)
+        return (self._answer, self._text, self._node)
 
 
 class Writer(Thread):
@@ -85,6 +88,12 @@ class Daemon:
         self._save = self._data['save']
         self._app = web.Application()
 
+    async def _async_delete_file(self, filename):
+        os.remove(os.path.join(self._directory, filename))
+
+    def _delete_file(self, loop, filename):
+        loop.create_task(self._async_delete_file(filename))
+
     async def _query_for_other_nodes(self, loop, filename):
         answer = None
         text = ""
@@ -92,12 +101,11 @@ class Daemon:
         for node in self._nodes:
             host = self._nodes[node]['host']
             port = self._nodes[node]['port']
-            save = self._nodes[node]['save']
-            request_thread = RequestHandler(loop, host, port, save, filename)
+            request_thread = RequestHandler(loop, host, port, node, filename)
             request_thread.start()
-            answer, text, need_to_save = await request_thread.join()
-        print(answer, text, need_to_save)
-        return (answer, text, need_to_save)
+            answer, text, node = await request_thread.join()
+        need_to_save = self._nodes[node]['save']
+        return (answer, text, need_to_save, node)
 
     async def _file_handler(self, request):
         query = request.rel_url.query
@@ -108,12 +116,14 @@ class Daemon:
         answer, text = await loop.run_in_executor(None, read_thread.join)
         if not answer:
             if not query.get('do_not_visit', None):
-                answer, text, save = await self._query_for_other_nodes(loop, filename)
+                answer, text, save, node = await self._query_for_other_nodes(loop, filename)
             if not answer:
                 raise web.HTTPNotFound
             if self._save and save:
                 write_thread = Writer(self._directory, filename, text)
                 write_thread.start()
+                time = self._nodes[node].get('time', None) or self._nodes['time']
+                loop.call_at(loop.time() + time, self._delete_file, loop, filename)
         return web.Response(text=text)
 
     async def _setup_routing(self):
