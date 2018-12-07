@@ -5,20 +5,21 @@ from yaml import load, dump
 from yaml import Loader, Dumper
 from sys import argv
 from argparse import ArgumentParser
-from asyncio import new_event_loop
+from asyncio import new_event_loop, get_event_loop
 
 
 class RequestHandler(Thread):
 
-    def __init__(self, host, port, filename):
+    def __init__(self, loop, host, port, filename):
         super().__init__()
-        self._url = 'http://' + host + ':' + str(port) + '/' + filename + '?redirect=True'
+        self._loop = loop
+        self._url = 'http://' + host + ':' + str(port) + '/' + filename + '?do_not_visit=True'
         self._text = ''
         self._answer = False
 
-    async def _get_responce(self, loop):
+    async def _get_responce(self):
         try:
-            async with ClientSession(loop=loop) as client:
+            async with ClientSession(loop=self._loop) as client:
                 async with client.get(self._url) as response:
                     if response.status == 200:
                         self._text = await response.text()
@@ -27,8 +28,7 @@ class RequestHandler(Thread):
             print('Connection to ' + self._url + ' failed!')
 
     def run(self):
-        loop = new_event_loop()
-        loop.run_until_complete(self._get_responce(loop))
+        self._loop.create_task(self._get_responce())
 
     def join(self):
         Thread.join(self)
@@ -83,24 +83,25 @@ class Daemon:
         self._save = self._data['save']
         self._app = web.Application()
 
-    async def _interview_other_nodes(self, filename):
+    async def _query_for_other_nodes(self, loop, filename):
         for node in self._nodes:
             host = self._nodes[node]['host']
             port = self._nodes[node]['port']
-            request_thread = RequestHandler(host, port, filename)
+            request_thread = RequestHandler(loop, host, port, filename)
             request_thread.start()
-            answer, text = request_thread.join()
+            answer, text = await loop.run_in_executor(None, request_thread.join)
         return (answer, text)
 
     async def _file_handler(self, request):
         query = request.rel_url.query
         filename = request.match_info['filename']
         read_thread = Reader(self._directory, filename)
+        loop = get_event_loop()
         read_thread.start()
-        answer, text = read_thread.join()
+        answer, text = await loop.run_in_executor(None, read_thread.join)
         if not answer:
-            if not query.get('redirect', None):
-                answer, text = await self._interview_other_nodes(filename)
+            if not query.get('do_not_visit', None):
+                answer, text = await self._query_for_other_nodes(loop, filename)
             if not answer:
                 raise web.HTTPNotFound
             if self._save:
@@ -109,12 +110,9 @@ class Daemon:
         return web.Response(text=text)
 
     async def _setup_routing(self):
-        routes = [('*', '/{filename}', self._file_handler, 'file_handler'),]
-        for route in routes:
-            self._app.router.add_route(route[0],
-                                       route[1],
-                                       route[2],
-                                       name=route[3])
+        self._app.add_routes([
+            web.route('*', '/{filename}', self._file_handler, name='file_handler'),
+            ])
 
     async def _create_app(self):
         self._app['dir'] = self._directory
