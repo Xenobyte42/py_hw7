@@ -10,12 +10,13 @@ from asyncio import new_event_loop, get_event_loop
 
 class RequestHandler(Thread):
 
-    def __init__(self, loop, host, port, filename):
+    def __init__(self, loop, host, port, save, filename):
         super().__init__()
         self._loop = loop
         self._url = 'http://' + host + ':' + str(port) + '/' + filename + '?do_not_visit=True'
         self._text = ''
         self._answer = False
+        self._save = save
 
     async def _get_responce(self):
         try:
@@ -28,11 +29,12 @@ class RequestHandler(Thread):
             print('Connection to ' + self._url + ' failed!')
 
     def run(self):
-        self._loop.create_task(self._get_responce())
+        self._task = self._loop.create_task(self._get_responce())
 
-    def join(self):
-        Thread.join(self)
-        return (self._answer, self._text)
+    async def join(self):
+        await self._task
+        await self._loop.run_in_executor(None, Thread.join, self)
+        return (self._answer, self._text, self._save)
 
 
 class Writer(Thread):
@@ -84,13 +86,18 @@ class Daemon:
         self._app = web.Application()
 
     async def _query_for_other_nodes(self, loop, filename):
+        answer = None
+        text = ""
+        save = False
         for node in self._nodes:
             host = self._nodes[node]['host']
             port = self._nodes[node]['port']
-            request_thread = RequestHandler(loop, host, port, filename)
+            save = self._nodes[node]['save']
+            request_thread = RequestHandler(loop, host, port, save, filename)
             request_thread.start()
-            answer, text = await loop.run_in_executor(None, request_thread.join)
-        return (answer, text)
+            answer, text, need_to_save = await request_thread.join()
+        print(answer, text, need_to_save)
+        return (answer, text, need_to_save)
 
     async def _file_handler(self, request):
         query = request.rel_url.query
@@ -101,10 +108,10 @@ class Daemon:
         answer, text = await loop.run_in_executor(None, read_thread.join)
         if not answer:
             if not query.get('do_not_visit', None):
-                answer, text = await self._query_for_other_nodes(loop, filename)
+                answer, text, save = await self._query_for_other_nodes(loop, filename)
             if not answer:
                 raise web.HTTPNotFound
-            if self._save:
+            if self._save and save:
                 write_thread = Writer(self._directory, filename, text)
                 write_thread.start()
         return web.Response(text=text)
@@ -125,7 +132,7 @@ class Daemon:
 def parse_args(args):
     parser = ArgumentParser(description='This is a server parser')
     parser.add_argument(
-        '-с',
+        '-c',
         action='store',
         dest='config',
         type=str,
